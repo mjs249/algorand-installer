@@ -1,0 +1,6 @@
+# requirements.txt
+psutil>=5.8.0
+requests>=2.26.0
+typing_extensions>=4.0.0
+packaging>=21.0
+tk>=0.1.0  # For GUI support
