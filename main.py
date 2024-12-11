@@ -1,4 +1,3 @@
-# main.py
 import sys
 import os
 import subprocess
@@ -9,26 +8,29 @@ import json
 import uuid
 
 class AlgorandInstaller:
+    DEFAULT_DATA_DIR = '/var/lib/algorand'  # Ubuntu default path constant
+
     def __init__(self):
         """Initialize the Algorand node installer."""
         self.config = {
-            'data_dir': '/var/lib/algorand',
+            'data_dir': self.DEFAULT_DATA_DIR,
             'logging_config': {
                 'Enable': False,
                 'SendToLog': True,
-                'URI': '',  # Default Algorand telemetry endpoint
-                'Name': os.uname()[1],  # Default to system hostname
-                'GUID': str(uuid.uuid4()),  # Generate unique identifier
-                'MinLogLevel': 2,  # Info level
-                'ReportHistoryLevel': 3,  # Warning level
-                'FilePath': '',  # Will be set during configuration
-                'UserName': '',  # Default empty for Algorand hosted endpoint
-                'Password': ''   # Default empty for Algorand hosted endpoint
+                'URI': '',
+                'Name': os.uname()[1],
+                'GUID': str(uuid.uuid4()),
+                'MinLogLevel': 2,
+                'ReportHistoryLevel': 3,
+                'FilePath': '',
+                'UserName': '',
+                'Password': ''
             }
         }
         self._setup_logging()
-        
+
     def _setup_logging(self) -> None:
+        """Setup logging configuration."""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
@@ -40,30 +42,31 @@ class AlgorandInstaller:
         try:
             self.logger.info("Setting up telemetry configuration...")
             
+            # Ensure data directory exists
+            data_dir = Path(self.DEFAULT_DATA_DIR)
+            if not data_dir.exists():
+                self.logger.error(f"Data directory {data_dir} does not exist!")
+                raise FileNotFoundError(f"Data directory {data_dir} not found")
+            
             # Create global config directory
             global_config_dir = Path.home() / '.algorand'
             global_config_dir.mkdir(parents=True, exist_ok=True)
             global_config_file = global_config_dir / 'logging.config'
             
-            # Create node-specific config directory
-            node_config_dir = Path(self.config['data_dir'])
-            node_config_file = node_config_dir / 'logging.config'
-            
             # Update config files
-            for config_path in [global_config_file, node_config_file]:
+            for config_path in [global_config_file, data_dir / 'logging.config']:
                 self.config['logging_config']['FilePath'] = str(config_path)
                 config_content = self.config['logging_config'].copy()
                 
-                # Write config with proper permissions
-                if config_path == node_config_file:
-                    # Write to temporary file first for node config
-                    temp_path = Path('/tmp/logging.config.tmp')
+                if str(config_path).startswith(self.DEFAULT_DATA_DIR):
+                    # For system paths, use temporary file and sudo
+                    temp_path = '/tmp/logging.config.tmp'
                     with open(temp_path, 'w') as f:
                         json.dump(config_content, f, indent=2)
                     
                     # Move to final location with proper ownership
                     subprocess.run([
-                        'sudo', 'mv', str(temp_path), str(config_path)
+                        'sudo', 'cp', temp_path, str(config_path)
                     ], check=True)
                     
                     subprocess.run([
@@ -73,33 +76,48 @@ class AlgorandInstaller:
                     subprocess.run([
                         'sudo', 'chmod', '644', str(config_path)
                     ], check=True)
+                    
+                    # Clean up temp file
+                    os.remove(temp_path)
                 else:
-                    # Global config can be written directly
+                    # Global config in user's home directory
                     with open(config_path, 'w') as f:
                         json.dump(config_content, f, indent=2)
             
-            # Disable telemetry initially using diagcfg
+            # Initialize telemetry settings
             self.logger.info("Initializing telemetry settings...")
-            subprocess.run([
+            result = subprocess.run([
                 'sudo', '-u', 'algorand', '-H', '-E',
-                'diagcfg', 'telemetry', 'disable'
-            ], check=True)
+                'diagcfg', 'telemetry', 'disable',
+                '-d', self.DEFAULT_DATA_DIR
+            ], capture_output=True, text=True, check=True)
+            self.logger.info(f"Telemetry disable result: {result.stdout.strip()}")
             
             # Verify telemetry configuration
             self.logger.info("Verifying telemetry configuration...")
             result = subprocess.run([
                 'sudo', '-u', 'algorand', '-H', '-E',
-                'diagcfg', 'telemetry'
+                'diagcfg', 'telemetry',
+                '-d', self.DEFAULT_DATA_DIR
             ], capture_output=True, text=True, check=True)
             
-            if "is disabled" not in result.stdout:
-                raise Exception("Telemetry verification failed")
+            # Check for either format of disabled message
+            valid_disabled_messages = [
+                "Telemetry logging disabled",
+                "Remote logging is currently disabled"
+            ]
             
-            # Restart node to apply telemetry settings
+            if not any(msg in result.stdout for msg in valid_disabled_messages):
+                self.logger.error(f"Unexpected telemetry output: {result.stdout}")
+                raise Exception("Telemetry verification failed - unexpected output")
+            
+            self.logger.info(f"Telemetry status: {result.stdout.strip()}")
+            
+            # Restart node to apply settings
             self.logger.info("Restarting node to apply telemetry settings...")
             subprocess.run(['sudo', 'systemctl', 'restart', 'algorand'], check=True)
             
-            # Wait for service to fully start
+            # Wait for service to start
             subprocess.run(['sleep', '5'], check=True)
             
             # Verify service is running
@@ -159,7 +177,7 @@ class AlgorandInstaller:
             # Set environment variable
             self.logger.info("Setting up environment variables...")
             bashrc_path = os.path.expanduser('~/.bashrc')
-            env_var = '\nexport ALGORAND_DATA=/var/lib/algorand\n'
+            env_var = f'\nexport ALGORAND_DATA={self.DEFAULT_DATA_DIR}\n'
             with open(bashrc_path, 'a') as f:
                 if env_var not in open(bashrc_path).read():
                     f.write(env_var)
@@ -169,7 +187,7 @@ class AlgorandInstaller:
             subprocess.run(['sudo', 'systemctl', 'start', 'algorand'], check=True)
             subprocess.run(['sudo', 'systemctl', 'enable', 'algorand'], check=True)
             
-            # Wait for service to fully start before configuring telemetry
+            # Wait for service to start
             subprocess.run(['sleep', '5'], check=True)
             
             # Configure telemetry after node is running
@@ -191,7 +209,7 @@ def print_usage_info():
     """Print helpful usage information after successful installation."""
     print("\nAlgorand Node Installation Complete!")
     print("\nImportant Notes:")
-    print("1. Node is installed and running at /var/lib/algorand")
+    print(f"1. Node is installed and running at {AlgorandInstaller.DEFAULT_DATA_DIR}")
     print("2. Environment variable ALGORAND_DATA has been set")
     print("3. Telemetry is disabled by default")
     print("\nTo enable telemetry with hostname:")
@@ -204,7 +222,7 @@ def print_usage_info():
     print("  sudo -u algorand -H -E diagcfg telemetry")
     print("  sudo netstat -an | grep :9243")
     print("\nUseful Commands:")
-    print("- Node status: goal node status -d /var/lib/algorand")
+    print(f"- Node status: goal node status -d {AlgorandInstaller.DEFAULT_DATA_DIR}")
     print("- Service control: sudo systemctl start/stop/restart algorand")
     print("- Wallet operations: sudo -u algorand -E goal account listpartkeys")
 
